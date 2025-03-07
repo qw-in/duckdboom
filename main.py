@@ -1,49 +1,52 @@
-import boto3
+from collections.abc import Callable
 import duckdb
+import timeit
 
-print("seeding bucket...")
 
-s3 = boto3.client(
-    "s3",
-    aws_access_key_id="admin",
-    aws_secret_access_key="admin123",
-    region_name="us-east-1",
-    endpoint_url="http://localhost:9000",
-)
-bucket_name = "boom"
-object_key = "format=SomeFormatOrSomething/$year=2024/$month=10/boom.zstd.parquet"
-try:
-    s3.create_bucket(Bucket=bucket_name)
-except:
-    pass
-s3.upload_file("boom.zstd.parquet", bucket_name, object_key)
+def run_prepped_reader(connection: duckdb.DuckDBPyConnection):
+    batch_reader = connection.sql(
+        """--sql
+        from read_parquet('crash100k.zstd.parquet')
+        limit $limit;
+    """,
+        params={"limit": 1_000_000},
+    ).fetch_arrow_reader(batch_size=1000)
 
-print("trying to crash...")
+    for _ in batch_reader:
+        pass
 
-for _ in range(0, 1000):
+
+def run_normal_reader(connection: duckdb.DuckDBPyConnection):
+    batch_reader = connection.sql(
+        """--sql
+        from read_parquet('crash100k.zstd.parquet')
+        limit 1000000;
+    """
+    ).fetch_arrow_reader(batch_size=1000)
+
+    for _ in batch_reader:
+        pass
+
+
+def benchmarkish(fn: Callable[[duckdb.DuckDBPyConnection], None], times=100):
     with duckdb.connect(
-        ":memory:",
-        config={"memory_limit": "4GB", "threads": "1"},
+        ":memory:", config={"memory_limit": "4GB", "threads": "1"}
     ) as connection:
-        connection.execute("""--sql
-            create secret (
-                type s3,
-                endpoint 'localhost:9000',
-                region 'us-east-1',
-                key_id 'admin',
-                secret 'admin123',
-                url_style 'path',
-                use_ssl false
-            );
-        """)
+        return timeit.timeit(lambda: fn(connection), number=times)
 
-        batch_reader = connection.sql(
-            """--sql
-            from read_parquet('s3://boom/format=SomeFormatOrSomething/$year=2024/$month=10/boom.zstd.parquet')
-            limit $foo;
-        """,
-            params={"foo": 10_000},
-        ).fetch_arrow_reader(batch_size=1000)
 
-        for _ in batch_reader:
-            pass
+def main():
+    times = 100
+
+    print(f"Timing normal ({times}x)...")
+    normal = benchmarkish(run_normal_reader, times=times)
+
+    print(f"Timing prepped ({times}x)...")
+    prepped = benchmarkish(run_prepped_reader, times=times)
+
+    print(f"Normal: {normal} seconds")
+    print(f"Prepped: {prepped} seconds")
+
+
+if __name__ == "__main__":
+    main()
